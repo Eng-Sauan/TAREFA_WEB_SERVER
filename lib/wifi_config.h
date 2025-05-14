@@ -1,0 +1,7 @@
+#ifndef WIFI_CONFIG_H
+#define WIFI_CONFIG_H
+
+#define WIFI_SSID "EMBARCA_SERVER"
+#define WIFI_PASSWORD "12345678"
+
+#endif
