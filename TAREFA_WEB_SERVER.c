@@ -4,23 +4,59 @@
 #include <string.h>
 #include <stdio.h>
 #include "lib/buzzer.h"
+#include "lib/led_matrix.h"
+#include "lib/ssd1306.h"
 
-// DEFINIÇÕES DE PINOS E WI-FI
-#define LED_PIN 12           // LED da "casa" (luz a ser controlada)
-#define BUTTON1_PIN 5        // Botão A
-#define BUTTON2_PIN 6        // Botão B
-
+#define BUTTON1_PIN 5
+#define BUTTON2_PIN 6
+#define WS2812_PIN 7
 #define WIFI_SSID "Ferreira-1"
 #define WIFI_PASS "vetoresespacoxyz"
 
-// Mensagens que mostram o estado dos botões
+// Configurações do display OLED
+#define OLED_WIDTH     128
+#define OLED_HEIGHT    64
+#define OLED_ADDR      0x3C
+#define OLED_I2C_PORT  i2c1
+#define OLED_SDA_PIN   14
+#define OLED_SCL_PIN   15
+#define OLED_I2C_FREQ  400000
+
 char button1_message[50] = "Nenhum evento no Botão 1";
 char button2_message[50] = "Nenhum evento no Botão 2";
+char http_response[2048];
 
-// Buffer para a resposta da página HTML
-char http_response[1024];
+bool luz_ligada = false;
+int intensidade_luz = 100; // 100% ou 50%
+volatile bool atualizar_display = true;
+bool matriz_inicializada = false;
 
-// Função para criar o conteúdo da página HTML
+void atualizar_oled(bool wifi_conectado) {
+    ssd1306_clear();
+    ssd1306_draw_string(0, 0, luz_ligada ? "Luz: Ligada" : "Luz: Desligada");
+    ssd1306_draw_string(0, 16, wifi_conectado ? "Wi-Fi: Conectado" : "Wi-Fi: Erro");
+    ssd1306_show();
+}
+
+void matriz_led_ligar(int intensidade) {
+    if (!matriz_inicializada) {
+        npInit(WS2812_PIN);
+        npClear();
+        npWrite();
+        matriz_inicializada = true;
+    }
+
+    FRAME1(); // Pode ajustar conforme necessidade para simular intensidade
+    npWrite();
+}
+
+void matriz_led_desligar() {
+    if (matriz_inicializada) {
+        FRAME2(); // LEDs apagados
+        npWrite();
+    }
+}
+
 void create_http_response() {
     snprintf(http_response, sizeof(http_response),
         "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=UTF-8\r\n\r\n"
@@ -41,16 +77,17 @@ void create_http_response() {
         "<h1>Controle de Iluminação</h1>"
         "<a href=\"/led/on\">Ligar Luz</a>"
         "<a href=\"/led/off\">Desligar Luz</a>"
+        "<a href=\"/intensidade\">Alternar Intensidade</a>"
         "<a href=\"/update\">Atualizar Estado</a>"
         "<h2>Status dos Botões:</h2>"
         "<p>Botão A: %s</p>"
         "<p>Botão B: %s</p>"
+        "<p>Intensidade atual: %d%%</p>"
         "</body>"
         "</html>\r\n",
-        button1_message, button2_message);
+        button1_message, button2_message, intensidade_luz);
 }
 
-// Callback que processa a requisição HTTP
 static err_t http_callback(void *arg, struct tcp_pcb *tpcb, struct pbuf *p, err_t err) {
     if (p == NULL) {
         tcp_close(tpcb);
@@ -59,60 +96,59 @@ static err_t http_callback(void *arg, struct tcp_pcb *tpcb, struct pbuf *p, err_
 
     char *request = (char *)p->payload;
 
-    // Processa comandos recebidos
     if (strstr(request, "GET /led/on")) {
-        gpio_put(LED_PIN, 1);                 // Liga LED
-        buzzer_play_tone(700, 500);          // Bip curto
+        matriz_led_ligar(intensidade_luz);
+        luz_ligada = true;
+        buzzer_play_tone(700, 500);
+        atualizar_oled(true);
     } else if (strstr(request, "GET /led/off")) {
-        gpio_put(LED_PIN, 0);                 // Desliga LED
-        buzzer_play_tone(700, 500);          // Bip curto
+        matriz_led_desligar();
+        luz_ligada = false;
+        buzzer_play_tone(700, 500);
+        atualizar_oled(true);
+    } else if (strstr(request, "GET /intensidade")) {
+        intensidade_luz = (intensidade_luz == 100) ? 50 : 100;
+        if (luz_ligada) matriz_led_ligar(intensidade_luz);
+        snprintf(button2_message, sizeof(button2_message), "Intensidade ajustada via Web: %d%%", intensidade_luz);
+        buzzer_play_tone(900, 200);
     }
 
-    // Atualiza a página com o estado atual
     create_http_response();
     tcp_write(tpcb, http_response, strlen(http_response), TCP_WRITE_FLAG_COPY);
-
     pbuf_free(p);
     return ERR_OK;
 }
 
-// Callback quando uma conexão chega
 static err_t connection_callback(void *arg, struct tcp_pcb *newpcb, err_t err) {
     tcp_recv(newpcb, http_callback);
     return ERR_OK;
 }
 
-// Inicia o servidor Web (HTTP na porta 80)
 static void start_http_server(void) {
     struct tcp_pcb *pcb = tcp_new();
-    if (!pcb) {
-        printf("Erro ao criar PCB\n");
-        return;
-    }
-
-    if (tcp_bind(pcb, IP_ADDR_ANY, 80) != ERR_OK) {
-        printf("Erro ao ligar o servidor na porta 80\n");
-        return;
-    }
-
+    if (!pcb) return;
+    if (tcp_bind(pcb, IP_ADDR_ANY, 80) != ERR_OK) return;
     pcb = tcp_listen(pcb);
     tcp_accept(pcb, connection_callback);
-
     printf("Servidor HTTP rodando na porta 80...\n");
 }
 
-// Função para monitorar o estado dos botões
 void monitor_buttons() {
     static bool button1_last_state = false;
     static bool button2_last_state = false;
 
-    bool button1_state = !gpio_get(BUTTON1_PIN); // Botão A pressionado = LOW
-    bool button2_state = !gpio_get(BUTTON2_PIN); // Botão B pressionado = LOW
+    bool button1_state = !gpio_get(BUTTON1_PIN);
+    bool button2_state = !gpio_get(BUTTON2_PIN);
 
     if (button1_state != button1_last_state) {
         button1_last_state = button1_state;
         if (button1_state) {
+            luz_ligada = !luz_ligada;
+            if (luz_ligada) matriz_led_ligar(intensidade_luz);
+            else matriz_led_desligar();
+            buzzer_play_tone(700, 500);
             snprintf(button1_message, sizeof(button1_message), "Botão A pressionado!");
+            atualizar_oled(true);
         } else {
             snprintf(button1_message, sizeof(button1_message), "Botão A solto!");
         }
@@ -121,7 +157,9 @@ void monitor_buttons() {
     if (button2_state != button2_last_state) {
         button2_last_state = button2_state;
         if (button2_state) {
-            snprintf(button2_message, sizeof(button2_message), "Botão B pressionado!");
+            intensidade_luz = (intensidade_luz == 100) ? 50 : 100;
+            if (luz_ligada) matriz_led_ligar(intensidade_luz);
+            snprintf(button2_message, sizeof(button2_message), "Botão B pressionado! Intensidade: %d%%", intensidade_luz);
         } else {
             snprintf(button2_message, sizeof(button2_message), "Botão B solto!");
         }
@@ -130,50 +168,40 @@ void monitor_buttons() {
 
 int main() {
     stdio_init_all();
-    sleep_ms(5000);  // Pequeno atraso para garantir que a USB estabilize
+    sleep_ms(5000);
     printf("Iniciando sistema Smart Home...\n");
 
-    // Inicializa Wi-Fi
-    if (cyw43_arch_init()) {
-        printf("Erro ao inicializar Wi-Fi\n");
-        return 1;
-    }
-
+    if (cyw43_arch_init()) return 1;
     cyw43_arch_enable_sta_mode();
-    printf("Conectando ao Wi-Fi...\n");
+    bool wifi_conectado = (cyw43_arch_wifi_connect_timeout_ms(WIFI_SSID, WIFI_PASS, CYW43_AUTH_WPA2_AES_PSK, 10000) == 0);
 
-    if (cyw43_arch_wifi_connect_timeout_ms(WIFI_SSID, WIFI_PASS, CYW43_AUTH_WPA2_AES_PSK, 10000)) {
-        printf("Falha ao conectar Wi-Fi\n");
-        return 1;
+    struct netif *netif = netif_list;
+    if (wifi_conectado) {
+        printf("Conectado ao Wi-Fi!\nIP local: %s\n", ipaddr_ntoa(&netif->ip_addr));
     } else {
-        printf("Wi-Fi conectado!\n");
-        uint8_t *ip_address = (uint8_t*)&(cyw43_state.netif[0].ip_addr.addr);
-        printf("Endereço IP: %d.%d.%d.%d\n", ip_address[0], ip_address[1], ip_address[2], ip_address[3]);
+        printf("Erro ao conectar no Wi-Fi\n");
     }
 
-    // Configura LED, Botões e Buzzer
-    gpio_init(LED_PIN);
-    gpio_set_dir(LED_PIN, GPIO_OUT);
+    gpio_init(BUTTON1_PIN); gpio_set_dir(BUTTON1_PIN, GPIO_IN); gpio_pull_up(BUTTON1_PIN);
+    gpio_init(BUTTON2_PIN); gpio_set_dir(BUTTON2_PIN, GPIO_IN); gpio_pull_up(BUTTON2_PIN);
+    buzzer_init();
 
-    gpio_init(BUTTON1_PIN);
-    gpio_set_dir(BUTTON1_PIN, GPIO_IN);
-    gpio_pull_up(BUTTON1_PIN);
-
-    gpio_init(BUTTON2_PIN);
-    gpio_set_dir(BUTTON2_PIN, GPIO_IN);
-    gpio_pull_up(BUTTON2_PIN);
-
-    buzzer_init(); // Inicializa buzzer
-
-    printf("LED, Botões e Buzzer configurados\n");
-
-    // Inicia o Webserver
     start_http_server();
 
-    // Loop principal
+    // Inicializa comunicação I2C com o display
+    i2c_init(OLED_I2C_PORT, OLED_I2C_FREQ);
+    gpio_set_function(OLED_SDA_PIN, GPIO_FUNC_I2C);
+    gpio_set_function(OLED_SCL_PIN, GPIO_FUNC_I2C);
+    gpio_pull_up(OLED_SDA_PIN);
+    gpio_pull_up(OLED_SCL_PIN);
+
+    // Inicializa o display OLED
+    ssd1306_init(OLED_I2C_PORT, OLED_SDA_PIN, OLED_SCL_PIN);
+    atualizar_oled(wifi_conectado);
+
     while (true) {
-        cyw43_arch_poll();   // Mantém Wi-Fi estável
-        monitor_buttons();   // Atualiza estado dos botões
+        cyw43_arch_poll();
+        monitor_buttons();
         sleep_ms(100);
     }
 

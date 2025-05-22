@@ -46,7 +46,9 @@ pico_sdk_init()
 
 # Add executable. Default name is the project name, version 0.1
 add_executable(TAREFA_WEB_SERVER TAREFA_WEB_SERVER.c
-lib/buzzer.c)
+lib/buzzer.c
+lib/led_matrix.c
+lib/ssd1306.c)
 
 target_include_directories(TAREFA_WEB_SERVER PRIVATE ${CMAKE_CURRENT_LIST_DIR})
 
@@ -66,6 +68,9 @@ target_link_libraries(TAREFA_WEB_SERVER
     pico_stdlib
     pico_cyw43_arch_lwip_threadsafe_background
     hardware_pwm
+    hardware_pio
+    hardware_clocks
+    hardware_i2c
 )
 
 pico_add_extra_outputs(TAREFA_WEB_SERVER)
